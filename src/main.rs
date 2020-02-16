@@ -50,18 +50,22 @@ impl Renamer for GitRenamer {
     }
 }
 
+fn get_renamer(arg: &Option<String>) -> Box<dyn Renamer> {
+    match arg {
+        Some(c) => match c.as_str() {
+            "git" => Box::new(GitRenamer::new()),
+            _ => Box::new(FileRenamer::new())
+        },
+        None => Box::new(FileRenamer::new())
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), std::boxed::Box<(dyn std::error::Error)>> {
     let date_offset = 286;
     let in_file = std::env::args().nth(1).unwrap();
     let renamer_arg = std::env::args().nth(2);
-    let renamer: Box<dyn Renamer> = match renamer_arg {
-        Some(c) => match c.as_str() {
-            "git" => Box::new(GitRenamer::new()),
-            _ => Box::new(FileRenamer::new())
-        },
-        _ => Box::new(FileRenamer::new())
-    };
+    let renamer = get_renamer(&renamer_arg);
 
     let filename = Path::new(&in_file);
     let mut f = tokio::fs::File::open(&filename).await.context("Failed to open input file")?;
