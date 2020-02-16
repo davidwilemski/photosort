@@ -66,6 +66,7 @@ async fn main() -> Result<(), std::boxed::Box<(dyn std::error::Error)>> {
     let in_file = std::env::args().nth(1).unwrap();
     let renamer_arg = std::env::args().nth(2);
     let renamer = get_renamer(&renamer_arg);
+    eprintln!("photosort {:?}", in_file);
 
     let filename = Path::new(&in_file);
     let mut f = tokio::fs::File::open(&filename).await.context("Failed to open input file")?;
