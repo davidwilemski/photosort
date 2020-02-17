@@ -1,8 +1,10 @@
+use std::convert::TryFrom;
 use std::io::SeekFrom;
-use std::path::{Path};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use thiserror::Error;
 use tokio::io::{AsyncReadExt};
 
 #[async_trait]
@@ -60,43 +62,81 @@ fn get_renamer(arg: &Option<String>) -> Box<dyn Renamer> {
     }
 }
 
+#[derive(Error, Debug)]
+enum FileParseError {
+    #[error("An error occured operating on a file: {0}")]
+    FileError(std::io::Error),
+    #[error("Error seeking: {0}")]
+    FileSeekError(String),
+    #[error("Error parsing date from file: {0}")]
+    DateParseError(String),
+}
+
+struct Date {
+    _src: String,
+}
+
+impl TryFrom<String> for Date {
+    type Error = FileParseError;
+
+    fn try_from(src: String) -> Result<Self, FileParseError> {
+        let mut date_time_vals = src.split_whitespace();
+        let date = date_time_vals.next().unwrap_or("");
+        let year_month_day = date.split(":").collect::<Vec<&str>>();
+        if year_month_day.len() != 3 {
+            return Err(FileParseError::DateParseError("Read something that is not a date".into()));
+        }
+
+        Ok(Date {_src: date.into() })
+    }
+}
+
+impl Date {
+    fn year(&self) -> &str {
+        self._src.split(":").nth(0).unwrap()
+    }
+
+    fn month(&self) -> &str {
+        self._src.split(":").nth(1).unwrap()
+    }
+
+    fn day(&self) -> &str {
+        self._src.split(":").nth(2).unwrap()
+    }
+}
+
+async fn get_date_from_file(file: &Path) -> Result<Date, FileParseError> {
+    let date_offset = 286;
+    let mut f = tokio::fs::File::open(file).await.map_err(|e| FileParseError::FileError(e))?;
+    let seek_result = f.seek(SeekFrom::Start(date_offset)).await;
+    if let Ok(pos) = seek_result {
+        eprintln!("seek postion: {}", pos);
+        if pos != date_offset {
+            return Err(FileParseError::FileSeekError("Failure to seek to date offset".into()));
+        }
+    }
+
+    // 2020:02:01 14:32:14.
+    let mut data = String::with_capacity(10);
+    f.take(10).read_to_string(&mut data).await.map_err(|e| FileParseError::FileError(e))?;
+    eprintln!("Result of metadata read: {:?}", data);
+    Date::try_from(data)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), std::boxed::Box<(dyn std::error::Error)>> {
-    let date_offset = 286;
     let in_file = std::env::args().nth(1).unwrap();
     let renamer_arg = std::env::args().nth(2);
     let renamer = get_renamer(&renamer_arg);
     eprintln!("photosort {:?}", in_file);
 
     let filename = Path::new(&in_file);
-    let mut f = tokio::fs::File::open(&filename).await.context("Failed to open input file")?;
-    let seek_result = f.seek(SeekFrom::Start(date_offset)).await;
-    if let Ok(pos) = seek_result {
-        eprintln!("seek postion: {}", pos);
-        if pos != date_offset {
-            eprintln!("failure to seek to date offset");
-            return Ok(());  // TODO non-zero exit
-        }
-    }
+    let date = get_date_from_file(&filename).await.context("Error in reading date out of input file")?;
 
-    // 2020:02:01 14:32:14.
-    let mut data = String::with_capacity(10);
-    f.take(10).read_to_string(&mut data).await.context("Failed to read bytes from input file")?;
-    eprintln!("Result of metadata read: {:?}", data);
-    let mut date_time_vals = data.split_whitespace();
-    let date = date_time_vals.next().unwrap_or("");
-    let year_month_day = date.split(":").collect::<Vec<&str>>();
-    if year_month_day.len() != 3 {
-        eprintln!("parsed something that is not a year/month/day: {:?}", year_month_day);
-        return Ok(());  // TODO non-zero exit
-    }
-    let year = year_month_day.get(0).expect("already validated size");
-    let month = year_month_day.get(1).expect("already validated size");
-    let day = year_month_day.get(2).expect("already validated size");
     let home_var = std::env::var("HOME").context("$HOME env var not available")?;
     let home_dir = Path::new(&home_var);
     let photos_dir = home_dir.join("annex/photos");
-    let new_path = format!("{}/{}/{}/{}", year, month, day, filename.file_name().unwrap().to_str().unwrap());
+    let new_path = format!("{}/{}/{}/{}", date.year(), date.month(), date.day(), filename.file_name().unwrap().to_str().unwrap());
     let dest = photos_dir.join(&new_path);
     let dest_dir = dest.parent().unwrap(); //.unwrap_or(Path::new("~/")).canonicalize().context("Failed to get parent of dest")?;
     eprintln!("input path: {:?}", filename);
