@@ -1,5 +1,5 @@
 use std::convert::TryFrom;
-use std::io::SeekFrom;
+use std::io::{BufRead, Cursor};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -70,6 +70,20 @@ enum FileParseError {
     FileSeekError(String),
     #[error("Error parsing date from file: {0}")]
     DateParseError(String),
+    #[error("Error converting file date bytes to date string: {0}")]
+    DateConvertError(std::string::FromUtf8Error)
+}
+
+impl From<std::io::Error> for FileParseError {
+    fn from(err: std::io::Error) -> FileParseError {
+        FileParseError::FileError(err)
+    }
+}
+
+impl From<std::string::FromUtf8Error> for FileParseError {
+    fn from(err: std::string::FromUtf8Error) -> FileParseError {
+        FileParseError::DateConvertError(err)
+    }
 }
 
 struct Date {
@@ -106,21 +120,62 @@ impl Date {
 }
 
 async fn get_date_from_file(file: &Path) -> Result<Date, FileParseError> {
-    let date_offset = 286;
+    let mut file_header = [0; 1024];
     let mut f = tokio::fs::File::open(file).await.map_err(|e| FileParseError::FileError(e))?;
-    let seek_result = f.seek(SeekFrom::Start(date_offset)).await;
-    if let Ok(pos) = seek_result {
-        eprintln!("seek postion: {}", pos);
-        if pos != date_offset {
-            return Err(FileParseError::FileSeekError("Failure to seek to date offset".into()));
-        }
-    }
+    f.read_exact(&mut file_header).await.map_err(|e| FileParseError::FileError(e))?;
 
-    // 2020:02:01 14:32:14.
-    let mut data = String::with_capacity(10);
-    f.take(10).read_to_string(&mut data).await.map_err(|e| FileParseError::FileError(e))?;
+    // First handle initial pattern of 'II*' indicating start of file (JPG has some stuff
+    // before that pattern, CR2 files appear to start with that pattern). This means that we can't
+    // check that there is only a single byte in the read buffer here because in JPG there might be
+    // more.
+    let mut read = Vec::with_capacity(1024);
+    let mut buf  = Cursor::new(&file_header[..]);
+    let _ = buf.read_until(0x49u8, &mut read)?;
+    read.clear();
+
+    let r = buf.read_until(0x49u8, &mut read)?;
+    if r != 1 {
+        return Err(FileParseError::FileSeekError(format!("Did not find expected bytes in file while seeking to date. Expected 1 byte 'I' (0x49), found: {:?}", read)));
+    }
+    read.clear();
+
+    let r = buf.read_until(0x2au8, &mut read)?;
+    if r != 1 {
+        return Err(FileParseError::FileSeekError(format!("Did not find expected bytes in file while seeking to date. Expected 1 byte '*' (0xau8), found: {:?}", read)));
+    }
+    read.clear();
+
+    // Should be just after II* at this point
+    buf.read_until(0x25u8, &mut read)?;
+    read.clear();
+
+    // There is a twice repeated pattern immediately before the date time string starts:
+    // 48 00 00 00 01 00 00 00  48 00 00 00 01 00 00 00, That is, an H 3 null bytes, a 1 byte
+    // (not ascii 1) and 3 more null bytes. Let's read through that, checking that we got what we
+    // expected at the end.
+    buf.read_until(0x48u8, &mut read)?;
+    read.clear();
+
+    let r = buf.read_until(0x48u8, &mut read)?;
+    let expected = [0x00u8, 0x00u8, 0x00u8, 0x01u8, 0x00u8, 0x00u8, 0x00u8, 0x48u8];
+    if r != 8 || read.as_slice() != expected {
+        return Err(FileParseError::FileSeekError(format!("Did not find expected bytes in file while seeking to date. Expected 8 bytes matching {:?}, found: {:?}", expected, read)));
+    }
+    read.clear();
+    buf.set_position(buf.position() + 7);
+
+    let mut data = [0; 10];
+    // For whatever reason the compiler is deciding to use tokio's AsyncRead implementation of this
+    // instead of the Cursor Read implementation of read_exact. Seems like having the AsyncRead
+    // trait in scope overrides the standard implementation of read_exact since Cursor implements
+    // both AsyncRead and Read. Since this is a read on an in-memory buffer, no other reason that
+    // it has to be async.
+    buf.read_exact(&mut data).await?;
+    // 2020:02:01 14:32:14
+    let date = String::from_utf8(data.into_iter().map(|b| *b).collect::<Vec<u8>>())?;
+
     eprintln!("Result of metadata read: {:?}", data);
-    Date::try_from(data)
+    Date::try_from(date)
 }
 
 #[tokio::main]
