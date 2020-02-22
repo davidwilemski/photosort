@@ -124,13 +124,25 @@ async fn get_date_from_file(file: &Path) -> Result<Date, FileParseError> {
     let mut f = tokio::fs::File::open(file).await.map_err(|e| FileParseError::FileError(e))?;
     f.read_exact(&mut file_header).await.map_err(|e| FileParseError::FileError(e))?;
 
-    // First handle initial pattern of 'II*' indicating start of file (JPG has some stuff
-    // before that pattern, CR2 files appear to start with that pattern). This means that we can't
-    // check that there is only a single byte in the read buffer here because in JPG there might be
-    // more.
+    // First find the initial pattern of 'II*' indicating start of file (JPG has its magic number
+    // and some other stuff before that pattern, CR2 files appear to start with that pattern).
+    let start: usize = file_header[0..16]
+        .windows(3)
+        .position(|seq| seq == &[0x49u8, 0x49u8, 0x2au8])
+        .ok_or(
+            FileParseError::FileSeekError(
+                format!(
+                    "Did not find 'II*' (0x49 0x49 0x2a) in file header. First 16 bytes: {:?}",
+                    &file_header[0..16])
+            )
+        )?;
+
     let mut read = Vec::with_capacity(1024);
-    let mut buf  = Cursor::new(&file_header[..]);
-    let _ = buf.read_until(0x49u8, &mut read)?;
+    let mut buf  = Cursor::new(&file_header[start..]);
+    let r = buf.read_until(0x49u8, &mut read)?;
+    if r != 1 {
+        return Err(FileParseError::FileSeekError(format!("Did not find expected bytes in file while seeking to date. Expected 1 byte 'I' (0x49), found: {:?}", read)));
+    }
     read.clear();
 
     let r = buf.read_until(0x49u8, &mut read)?;
